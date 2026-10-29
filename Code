@@ -1,0 +1,104 @@
+import sys
+import time
+from collections import defaultdict
+from scapy.all import sniff, IP, TCP, UDP, conf
+
+# ==============================================================================
+# CONFIGURATION & THRESHOLDS (SOC Alert Rules)
+# ==============================================================================
+DOS_PACKET_THRESHOLD = 150  
+DOS_TIME_WINDOW = 2.0       
+
+
+LOGIN_KEYWORDS = [b"user", b"pass", b"password", b"login", b"secret", b"pwd"]
+
+
+packet_tracker = defaultdict(list)
+syn_flood_tracker = defaultdict(int)
+
+# ==============================================================================
+# PACKET ANALYSIS ENGINE
+# ==============================================================================
+def analyze_packet(packet):
+    current_time = time.time()
+
+    # Überprüfe Layer 3 (Netzwerkschicht)
+    if packet.haslayer(IP):
+        src_ip = packet[IP].src
+        dst_ip = packet[IP].dst
+        
+        # ----------------------------------------------------------------------
+        # DETECTOR 1: Volumetrische DoS-Erkennung (Traffic Volume)
+        # ----------------------------------------------------------------------
+        
+        packet_tracker[src_ip] = [t for t in packet_tracker[src_ip] if current_time - t < DOS_TIME_WINDOW]
+        packet_tracker[src_ip].append(current_time)
+        
+        
+        if len(packet_tracker[src_ip]) > DOS_PACKET_THRESHOLD:
+            print(f"[ALERT] [DoS Traffic] Hohes Paketaufkommen von IP: {src_ip}")
+            print(f"        -> {len(packet_tracker[src_ip])} Pakete in den letzten {DOS_TIME_WINDOW} Sekunden!")
+            print("-" * 50)
+
+        # ----------------------------------------------------------------------
+        # DETECTOR 2: DoS SYN-Flood Erkennung (Halboffene Verbindungen)
+        # ----------------------------------------------------------------------
+        if packet.haslayer(TCP):
+            
+            if packet[TCP].flags == "S":
+                syn_flood_tracker[src_ip] += 1
+                if syn_flood_tracker[src_ip] > 50:  # Mehr als 50 SYN-Pakete ohne ACK
+                    print(f"[ALERT] [DoS SYN-Flood] Möglicher SYN-Angriff von IP: {src_ip}")
+                    print(f"        -> {syn_flood_tracker[src_ip]} halboffene Verbindungsanfragen detektiert!")
+                    print("-" * 50)
+            else:
+                
+                if syn_flood_tracker[src_ip] > 0:
+                    syn_flood_tracker[src_ip] -= 1
+
+        # ----------------------------------------------------------------------
+        # DETECTOR 3: Klartext-Anmeldedaten (Cleartext Credentials)
+        # ----------------------------------------------------------------------
+        if packet.haslayer(TCP) and packet[TCP].payload:
+            payload_bytes = bytes(packet[TCP].payload).lower()
+            
+            
+            if any(keyword in payload_bytes for keyword in LOGIN_KEYWORDS):
+                
+                readable_payload = payload_bytes.decode('utf-8', errors='ignore').strip()
+                
+                cleaned_payload = " ".join(readable_payload.split())[:120]
+                
+                print(f"[WARNING] [Insecure Protocol] Unverschlüsselte Daten von {src_ip} -> {dst_ip}")
+                print(f"          Inhalt (Auszug): {cleaned_payload}")
+                print("-" * 50)
+
+# ==============================================================================
+# MAIN APPLICATION LOOP
+# ==============================================================================
+def main():
+    print("=" * 70)
+    print("      DANIEL RUL - CUSTOM BLUE TEAM NETWORK MONITORING TOOL      ")
+    print("=" * 70)
+    
+    
+    active_iface = conf.iface
+    print(f"[1] Aktive Netzwerkschnittstelle: {active_iface}")
+    print(f"[2] DoS-Schwellenwert: {DOS_PACKET_THRESHOLD} Pakete / {DOS_TIME_WINDOW}s")
+    print("[3] Starte Packet Sniffing... Drücke STRG+C zum Beenden.")
+    print("=" * 70)
+    
+    try:
+        
+        sniff(prn=analyze_packet, store=False)
+    except PermissionError:
+        print("\n[ERROR] Fehlende Berechtigungen!")
+        print(" -> Unter Windows: Starte VS Code / Terminal explizit als ADMINISTRATOR.")
+        print(" -> Unter Linux/macOS: Führe das Skript mit 'sudo python3' aus.")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n[*] Monitoring durch Benutzer gestoppt. Logs geschlossen.")
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()
